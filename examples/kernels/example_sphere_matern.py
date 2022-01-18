@@ -1,12 +1,10 @@
 import numpy as np
-import torch
-import gpytorch
 import functools
 from mayavi import mlab
 from scipy.special import sph_harm
 
-from geometric_kernels.kernels import MaternKarhunenLoeveKernel
-from geometric_kernels.spaces import Sphere
+from geometric_kernels.kernels.geometric_kernels import MaternIntegratedKernel
+from geometric_kernels.spaces.sphere import Sphere
 
 
 def spherical_harmonic(x, m, n):
@@ -23,9 +21,6 @@ def spherical_harmonic(x, m, n):
     -------
     :return: value of the spherical harmonic at x              (torch [1,1] array)
     """
-    # Data to numpy
-    torch_type = x.dtype
-    x = x.cpu().detach().numpy()
     if np.ndim(x) < 2:
         x = x[None]
     x = x[0]
@@ -35,67 +30,56 @@ def spherical_harmonic(x, m, n):
     phi = np.arctan2(x[1], x[0])
 
     y = sph_harm(m, n, phi, theta).real
-    return torch.tensor(y[None, None], dtype=torch_type)
-
-
-class ExactGPModel(gpytorch.models.ExactGP):
-    def __init__(self, train_x, train_y, likelihood, covar_module):
-        super(ExactGPModel, self).__init__(train_x, train_y, likelihood)
-        self.mean_module = gpytorch.means.ConstantMean()
-        self.covar_module = covar_module
-
-    def forward(self, x):
-        mean_x = self.mean_module(x)
-        covar_x = self.covar_module(x)
-        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+    return y
 
 
 if __name__ == "__main__":
     # Create the manifold
-    dimension = 3
-    sphere_manifold = Sphere(dimension)  # TODO create sphere space
+    dimension = 2
+    sphere_manifold = Sphere(dimension)
 
     # Test function
     test_function = functools.partial(spherical_harmonic, m=1, n=2)
 
     # Define training observations
     nb_data_train = 10
-    train_x = torch.tensor(np.array([sphere_manifold.rand() for n in range(nb_data_train)]))
-    train_y = torch.zeros(nb_data_train, dtype=torch.float64)
+    train_x = np.random.randn(nb_data_train, dimension + 1)
+    train_x = train_x / np.linalg.norm(train_x, axis=1)[:, None]
+    train_y = np.zeros(nb_data_train)
     for n in range(nb_data_train):
         train_y[n] = test_function(train_x[n])
 
     # Define the kernel function
-    kernel = MaternKarhunenLoeveKernel(space=sphere_manifold, nu=2.5, num_eigenfunctions=10)
-
-    # Initialize likelihood and model
-    likelihood = gpytorch.likelihoods.GaussianLikelihood()
-    model = ExactGPModel(train_x, train_y, likelihood, kernel)
+    matern_kernel = MaternIntegratedKernel(sphere_manifold, nu=2.5, num_points_t=100)
+    lengthscale = 1.
 
     # Generate a grid on the sphere
     radius = 1.
-    n_elems = 50
+    n_elems = 30
     u = np.linspace(0, 2 * np.pi, n_elems)
     v = np.linspace(0, np.pi, n_elems)
     x = radius * np.outer(np.cos(u), np.sin(v))
     y = radius * np.outer(np.sin(u), np.sin(v))
     z = radius * np.outer(np.ones(np.size(u)), np.cos(v))
 
-    x_grid_np = np.vstack((np.reshape(x, (n_elems*n_elems)),
-                           np.reshape(y, (n_elems*n_elems)),
-                           np.reshape(z, (n_elems*n_elems)))).T
-    x_grid = torch.from_numpy(x_grid_np)
+    x_grid = np.vstack((np.reshape(x, (n_elems*n_elems)),
+                        np.reshape(y, (n_elems*n_elems)),
+                        np.reshape(z, (n_elems*n_elems)))).T
 
     # Generate prior and posterior samples
     nb_samples = 3
     # Prior samples
-    prior_mean = model.mean_module(x_grid).detach().numpy()
-    prior_covariance = model.covar_module(x_grid, x_grid).detach().numpy()
+    prior_mean = np.zeros(n_elems**2)
+    prior_covariance = matern_kernel.K(x_grid, x_grid, lengthscale=lengthscale)
+    # model.covar_module(x_grid, x_grid).detach().numpy()
     prior_samples = np.random.multivariate_normal(prior_mean, prior_covariance, size=nb_samples)
+
     # Posterior mean and variance
-    f_preds = model(x_grid)
-    mean_preds = f_preds.mean.detach().numpy()
-    covariance_preds = f_preds.covariance_matrix.detach().numpy()
+    k_train = matern_kernel.K(train_x, train_x, lengthscale=lengthscale) + 1e-6 * np.eye(nb_data_train)
+    inv_k_train = np.linalg.inv(k_train)
+    k_train_test = matern_kernel.K(train_x, x_grid, lengthscale=lengthscale)
+    mean_preds = np.dot(k_train_test.T, np.dot(inv_k_train, train_y))
+    covariance_preds = prior_covariance - np.dot(k_train_test.T, np.dot(inv_k_train, k_train_test))
     # Posterior samples
     posterior_samples = np.random.multivariate_normal(mean_preds, covariance_preds, size=nb_samples)
 
