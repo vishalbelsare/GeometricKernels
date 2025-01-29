@@ -1,0 +1,45 @@
+name: Docs
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      #----------------------------------------------
+      #       check-out repo and set-up python
+      #----------------------------------------------
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+      #----------------------------------------------
+      #       install
+      #----------------------------------------------
+    - name: Install dependencies
+      run: |
+        make install
+        pip install -r docs/requirements.txt
+    - name: Build documentation
+      run: |
+        make docs
+        ls -all docs/_build/html
+    - name: Clean
+      run: |
+        TMP_DIR=$(mktemp -d -p $(pwd))
+        mv docs/_build/html/* $TMP_DIR
+        rm -rf docs
+        mv $TMP_DIR docs
+        ls -all docs
+        touch docs/.nojekyll
+    - name: Push to GitHub
+      run: |
+        git add .
+        git add -f docs/autoapi/*
+        git config --global user.email "none"
+        git config --global user.name "github-actions-bot"
+        git commit -m "build documentation [ci skip]"
+        git push -f origin HEAD:gh-pages
